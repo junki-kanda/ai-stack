@@ -2,6 +2,7 @@
 """
 Production-ready health check server for batch applications.
 Provides HTTP endpoints for container orchestration while running batch jobs.
+Integrated with FinOps cost tracking.
 """
 import asyncio
 import os
@@ -79,6 +80,18 @@ class BatchExecutor:
                 self.last_error = None
                 self.consecutive_errors = 0
                 logger.info(f"Batch completed successfully in {duration:.2f}s")
+                
+                # FinOpsでFly.io実行時間を記録
+                try:
+                    from agents.finops import FinOpsAgent
+                    finops = FinOpsAgent()
+                    finops.track_fly_usage(
+                        machine_type="shared-cpu-1x",
+                        duration_seconds=duration,
+                        memory_gb=0.512
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to track Fly.io usage: {e}")
                 
                 return {
                     'status': 'success',
@@ -215,6 +228,42 @@ class HealthCheckServer:
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
     
+    async def cost_status(self, request=None) -> Dict[str, Any]:
+        """コストステータスエンドポイント（FinOps統合）"""
+        try:
+            from agents.metric import get_cost_summary
+            return get_cost_summary()
+        except Exception as e:
+            logger.error(f"Failed to get cost status: {e}")
+            return {
+                'error': str(e),
+                'message': 'Cost tracking not available'
+            }
+    
+    async def daily_cost_report(self, request=None) -> Dict[str, Any]:
+        """日次コストレポートの生成とSlack送信"""
+        try:
+            from agents.finops import generate_and_send_daily_report
+            report = generate_and_send_daily_report()
+            
+            return {
+                'status': 'success',
+                'message': 'Daily cost report generated and sent',
+                'summary': {
+                    'date': report.date,
+                    'total_cost': report.total_cost,
+                    'openai_cost': report.openai_cost,
+                    'fly_cost': report.fly_cost,
+                    'alerts': report.alerts
+                }
+            }
+        except Exception as e:
+            logger.error(f"Failed to generate daily report: {e}")
+            return {
+                'status': 'error',
+                'error': str(e)
+            }
+    
     def _get_memory_usage(self) -> float:
         """メモリ使用量を取得 (MB)"""
         try:
@@ -234,6 +283,10 @@ class HealthCheckServer:
         app.router.add_post('/trigger', self._wrap_handler(self.trigger_batch))
         app.router.add_get('/', self._wrap_handler(self.health_check))
         
+        # FinOpsエンドポイント
+        app.router.add_get('/cost', self._wrap_handler(self.cost_status))
+        app.router.add_post('/finops/daily-report', self._wrap_handler(self.daily_cost_report))
+        
         # サーバー起動
         runner = web.AppRunner(app)
         await runner.setup()
@@ -241,10 +294,25 @@ class HealthCheckServer:
         await site.start()
         
         logger.info(f"Health check server started on port {self.port}")
+        logger.info("Available endpoints:")
+        logger.info("  GET  /health - Basic health check")
+        logger.info("  GET  /status - Detailed status")
+        logger.info("  POST /trigger - Trigger batch execution")
+        logger.info("  GET  /cost - Current cost summary")
+        logger.info("  POST /finops/daily-report - Generate daily cost report")
         
         # 初回バッチ実行
         if self.run_batch_on_start:
             await self.trigger_batch()
+        
+        # 起動時のコストサマリーを表示
+        try:
+            cost_summary = await self.cost_status()
+            if 'error' not in cost_summary:
+                logger.info(f"Current daily cost: ${cost_summary.get('total_cost', 0):.2f}")
+                logger.info(f"Daily budget: ${cost_summary.get('daily_budget', 0):.2f}")
+        except Exception:
+            pass
         
         # シャットダウンまで待機
         await self.shutdown_event.wait()
@@ -273,9 +341,24 @@ class HealthCheckServer:
                     response = asyncio.run(self.server.health_check())
                 elif self.path == '/status':
                     response = asyncio.run(self.server.detailed_status())
+                elif self.path == '/cost':
+                    response = asyncio.run(self.server.cost_status())
                 else:
                     response = {'error': 'Not found'}
                 
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode())
+            
+            def do_POST(self):
+                if self.path == '/trigger':
+                    response = asyncio.run(self.server.trigger_batch())
+                elif self.path == '/finops/daily-report':
+                    response = asyncio.run(self.server.daily_cost_report())
+                else:
+                    response = {'error': 'Not found'}
+                    
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
