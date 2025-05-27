@@ -1,0 +1,24 @@
+name: Daily Cost Report
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 毎日深夜0時（JST）
+  workflow_dispatch:
+
+jobs:
+  cost-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger daily cost report
+        run: |
+          # マシンを起動
+          fly scale count 1 --app ai-stack-junkikanda --yes
+          sleep 30
+          
+          # レポート生成
+          curl -X POST https://ai-stack-junkikanda.fly.dev/finops/daily-report
+          
+          # マシンを停止
+          fly scale count 0 --app ai-stack-junkikanda --yes
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
