@@ -42,11 +42,10 @@ jobs:
       
       - name: Deploy to Fly.io
         run: |
-          # Fly CLIが正しくインストールされているか確認
-          which flyctl || echo "flyctl not found, using fly"
-          fly version || flyctl version
+          # Fly CLIバージョン確認
+          flyctl version
           
-          # デプロイ実行
-          fly deploy --remote-only --wait-timeout 300
+          # デプロイ実行（flyctlを使用）
+          flyctl deploy --remote-only --wait-timeout 300
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
