@@ -1,0 +1,101 @@
+name: Scheduled Batch Execution
+
+on:
+  schedule:
+    # 6時間ごとに実行（日本時間 3:00, 9:00, 15:00, 21:00）
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  trigger-batch:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Start Fly.io machine
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Fly CLIをインストール
+          curl -L https://fly.io/install.sh | sh
+          export FLYCTL_INSTALL="/home/runner/.fly"
+          export PATH="$FLYCTL_INSTALL/bin:$PATH"
+          
+          # マシンを起動
+          echo "Starting machine..."
+          fly scale count 1 --app ai-stack-junkikanda --yes
+          
+          # 起動を待つ
+          echo "Waiting for machine to be ready..."
+          sleep 30
+          
+          # ヘルスチェック
+          max_attempts=10
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -f https://ai-stack-junkikanda.fly.dev/health; then
+              echo "Health check passed"
+              break
+            fi
+            echo "Waiting for health check... (attempt $((attempt+1))/$max_attempts)"
+            sleep 10
+            attempt=$((attempt+1))
+          done
+      
+      - name: Trigger batch job
+        run: |
+          echo "Triggering batch execution..."
+          response=$(curl -s -X POST https://ai-stack-junkikanda.fly.dev/trigger)
+          echo "Response: $response"
+          
+          # バッチ完了を待つ
+          echo "Waiting for batch to complete..."
+          sleep 60
+      
+      - name: Check batch status
+        id: check_status
+        run: |
+          status=$(curl -s https://ai-stack-junkikanda.fly.dev/status)
+          echo "Status: $status"
+          
+          # jq を使ってステータスを解析
+          last_status=$(echo "$status" | jq -r '.batch.last_status // "unknown"')
+          error_count=$(echo "$status" | jq -r '.batch.error_count // 0')
+          
+          echo "last_status=$last_status" >> $GITHUB_OUTPUT
+          echo "error_count=$error_count" >> $GITHUB_OUTPUT
+          
+          if [ "$last_status" != "success" ]; then
+            echo "❌ Batch failed with status: $last_status"
+            exit 1
+          fi
+          
+          echo "✅ Batch completed successfully"
+      
+      - name: Stop Fly.io machine
+        if: always()  # 成功・失敗に関わらず実行
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          export FLYCTL_INSTALL="/home/runner/.fly"
+          export PATH="$FLYCTL_INSTALL/bin:$PATH"
+          
+          echo "Stopping machine to save costs..."
+          fly scale count 0 --app ai-stack-junkikanda --yes
+          echo "Machine stopped"
+      
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.check_status.outputs.last_status }}';
+            const errorCount = '${{ steps.check_status.outputs.error_count }}';
+            
+            // GitHubのIssueを作成（オプション）
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Batch execution failed - ${new Date().toISOString()}`,
+              body: `## Batch Execution Failed\n\n- Status: ${status}\n- Error Count: ${errorCount}\n- Time: ${new Date().toISOString()}\n\nCheck logs: https://fly.io/apps/ai-stack-junkikanda/monitoring`,
+              labels: ['bug', 'batch-failure']
+            });

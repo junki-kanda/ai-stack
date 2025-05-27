@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+# Poetry
+.venv/
+poetry.lock
+# Env
+.env
+# VSCode / PyCharm など
+.idea/
+.vscode/
