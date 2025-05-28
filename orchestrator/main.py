@@ -107,7 +107,8 @@ langgraph_app = create_graph()
 job_status = {
     "current_job": None,
     "last_completed": None,
-    "history": []
+    "history": [],
+    "job_results": {}  # ジョブIDごとの詳細結果を保存
 }
 
 # ===============================================================
@@ -232,6 +233,26 @@ async def trigger_daily_report():
     else:
         raise HTTPException(status_code=500, detail=result.get("error"))
 
+@app.get("/job/{job_id}")
+async def get_job_result(job_id: str):
+    """Get detailed job result by ID"""
+    if job_id in job_status["job_results"]:
+        return job_status["job_results"][job_id]
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Job {job_id} not found. Available jobs: {list(job_status['job_results'].keys())}"
+        )
+
+@app.get("/jobs")
+async def list_jobs():
+    """List all available job IDs"""
+    return {
+        "jobs": job_status["history"],
+        "total": len(job_status["history"]),
+        "available_details": list(job_status["job_results"].keys())
+    }
+
 # ===============================================================
 # 非同期ワークフロー実行
 # ===============================================================
@@ -261,10 +282,29 @@ async def run_workflow_async(job_id: str, payload: TriggerPayload):
             "code_generated": bool(result.get("code"))
         }
         
+        # 詳細結果を保存
+        job_status["job_results"][job_id] = {
+            "job_id": job_id,
+            "task": payload.task,
+            "keyword": payload.keyword,
+            "code": result.get("code", ""),
+            "test_results": result.get("test_results", {}),
+            "test_details": result.get("test_details", ""),
+            "review": result.get("review", ""),
+            "metrics": result.get("metrics", {}),
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
         # 履歴に追加（最新10件のみ保持）
         job_status["history"].append(job_status["last_completed"])
         if len(job_status["history"]) > 10:
             job_status["history"] = job_status["history"][-10:]
+            # 古い詳細結果も削除
+            old_job_ids = [j["job_id"] for j in job_status["history"]]
+            job_status["job_results"] = {
+                k: v for k, v in job_status["job_results"].items() 
+                if k in old_job_ids
+            }
             
     except Exception as e:
         # エラー時の処理
