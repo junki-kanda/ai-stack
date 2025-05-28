@@ -211,17 +211,24 @@ async def trigger_daily_report():
     """Trigger daily FinOps report"""
     finops = FinOpsAgent()
     
-    # メトリクスの取得（実際の実装では、保存されたメトリクスから取得）
-    metrics = {
-        "daily_cost": 0.6,
-        "monthly_cost": 18.0,
-        "tokens_today": 12000
-    }
+    # 日次レポートを生成
+    report = finops.generate_daily_report()
     
-    result = finops.send_daily_report(metrics)
+    # Slackに送信
+    result = finops.send_daily_report(report)
     
     if result.get("success"):
-        return {"status": "sent", "message": "Daily report sent to Slack"}
+        return {
+            "status": "sent",
+            "message": "Daily report sent to Slack",
+            "report_summary": {
+                "date": report.date,
+                "total_cost": report.total_cost,
+                "openai_cost": report.openai_cost,
+                "fly_cost": report.fly_cost,
+                "alerts": report.alerts
+            }
+        }
     else:
         raise HTTPException(status_code=500, detail=result.get("error"))
 
