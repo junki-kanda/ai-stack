@@ -76,6 +76,7 @@ class FinOpsAgent:
         # Budget settings
         self.daily_budget = float(os.getenv('DAILY_BUDGET', '10.0'))  # $10/day default
         self.monthly_budget = float(os.getenv('MONTHLY_BUDGET', '300.0'))  # $300/month
+        self.webhook_url = os.getenv("SLACK_WEBHOOK_URL")
         
     def track_openai_usage(self, model: str, input_tokens: int, output_tokens: int, 
                           metadata: Optional[Dict] = None) -> UsageRecord:
@@ -153,16 +154,15 @@ class FinOpsAgent:
         # Generate alerts
         alerts = []
         if total_cost > self.daily_budget:
-            alerts.append(f"⚠️ Daily budget exceeded: ${total_cost:.2f} > ${self.daily_budget}")
-        
-        if total_cost > self.daily_budget * 0.8:
-            alerts.append(f"⚠️ Approaching daily budget: ${total_cost:.2f} (80% of ${self.daily_budget})")
+            alerts.append(f"Daily budget exceeded: ${total_cost:.2f} > ${self.daily_budget}")
+        elif total_cost > self.daily_budget * 0.8:
+            alerts.append(f"Approaching daily budget: ${total_cost:.2f} (80% of ${self.daily_budget})")
         
         # Monthly projection
         days_in_month = 30
         projected_monthly = total_cost * days_in_month
         if projected_monthly > self.monthly_budget:
-            alerts.append(f"⚠️ Projected monthly cost ${projected_monthly:.2f} exceeds budget ${self.monthly_budget}")
+            alerts.append(f"Projected monthly cost ${projected_monthly:.2f} exceeds budget ${self.monthly_budget}")
         
         # Generate recommendations
         recommendations = self._generate_recommendations(records)
@@ -181,6 +181,234 @@ class FinOpsAgent:
         self._save_report(report)
         
         return report
+    
+    def format_cost_report(self, report: CostReport) -> Dict[str, Any]:
+        """Format cost report for human-readable Slack message"""
+        
+        # 予算使用率の計算
+        daily_usage_percent = (report.total_cost / self.daily_budget * 100) if self.daily_budget > 0 else 0
+        
+        # Monthly projection
+        projected_monthly = report.total_cost * 30
+        monthly_usage_percent = (projected_monthly / self.monthly_budget * 100) if self.monthly_budget > 0 else 0
+        
+        # 色の決定（閾値ベース）
+        daily_color = self._get_color_by_threshold(daily_usage_percent)
+        
+        # 合計トークン数の計算
+        total_tokens = sum(
+            r.quantity for r in report.usage_details 
+            if r.service == "openai"
+        )
+        
+        # 実行時間の計算
+        total_runtime_seconds = sum(
+            r.quantity for r in report.usage_details 
+            if r.service == "fly"
+        )
+        
+        # Slack Block Kit形式のメッセージ
+        slack_message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📊 AI-Stack Daily Cost Report"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*📅 Date:*\n{report.date}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*🤖 Total Tokens:*\n{int(total_tokens):,}"
+                        }
+                    ]
+                },
+                {
+                    "type": "divider"
+                },
+                # Daily Cost Section
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*💰 Daily Cost Summary*"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Total Spent:*\n${report.total_cost:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Daily Budget:*\n${self.daily_budget:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Usage:*\n{daily_usage_percent:.1f}%"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Status:*\n{self._get_status_emoji(daily_usage_percent)}"
+                        }
+                    ]
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": self._create_progress_bar(daily_usage_percent)
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                # Service Breakdown
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*🔍 Service Breakdown*"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*🧠 OpenAI:*\n${report.openai_cost:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*☁️ Fly.io:*\n${report.fly_cost:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*⏱️ Runtime:*\n{total_runtime_seconds/60:.1f} min"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*📈 Jobs:*\n{len(set(r.metadata.get('job_id', '') for r in report.usage_details if r.metadata.get('job_id')))}"
+                        }
+                    ]
+                },
+                {
+                    "type": "divider"
+                },
+                # Monthly Projection
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*📅 Monthly Projection*"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Projected:*\n${projected_monthly:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Budget:*\n${self.monthly_budget:.2f}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Usage:*\n{monthly_usage_percent:.1f}%"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Status:*\n{self._get_status_emoji(monthly_usage_percent)}"
+                        }
+                    ]
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": self._create_progress_bar(monthly_usage_percent)
+                    }
+                }
+            ]
+        }
+        
+        # Add alerts if any
+        if report.alerts:
+            slack_message["blocks"].extend([
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*⚠️ Alerts*\n" + "\n".join(f"• {alert}" for alert in report.alerts)
+                    }
+                }
+            ])
+        
+        # Add recommendations
+        if report.recommendations:
+            slack_message["blocks"].extend([
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*💡 Recommendations*\n" + "\n".join(f"• {rec}" for rec in report.recommendations)
+                    }
+                }
+            ])
+        
+        # Attach color based on budget status
+        slack_message["attachments"] = [
+            {
+                "color": daily_color,
+                "footer": "AI-Stack FinOps",
+                "footer_icon": "https://platform.slack-edge.com/img/default_application_icon.png",
+                "ts": int(datetime.now().timestamp())
+            }
+        ]
+        
+        return slack_message
+    
+    def _get_color_by_threshold(self, usage_percent: float) -> str:
+        """Get color based on usage threshold"""
+        if usage_percent >= 90:
+            return "danger"  # Red
+        elif usage_percent >= 70:
+            return "warning"  # Yellow
+        else:
+            return "good"    # Green
+    
+    def _get_status_emoji(self, usage_percent: float) -> str:
+        """Get status emoji based on usage"""
+        if usage_percent >= 90:
+            return "🔴 Critical"
+        elif usage_percent >= 70:
+            return "🟡 Warning"
+        else:
+            return "🟢 Good"
+    
+    def _create_progress_bar(self, percent: float) -> str:
+        """Create visual progress bar"""
+        filled = int(min(percent, 100) / 10)  # Cap at 100%
+        empty = 10 - filled
+        bar = "█" * filled + "░" * empty
+        return f"`{bar}` {percent:.1f}%"
     
     def _generate_recommendations(self, records: List[UsageRecord]) -> List[str]:
         """Generate cost optimization recommendations"""
@@ -209,6 +437,26 @@ class FinOpsAgent:
             recommendations.append("✅ Usage patterns look optimal")
         
         return recommendations
+    
+    def send_daily_report(self, report: CostReport) -> Dict[str, Any]:
+        """Send formatted daily report to Slack"""
+        if not self.webhook_url:
+            return {"error": "SLACK_WEBHOOK_URL not configured"}
+        
+        formatted_message = self.format_cost_report(report)
+        
+        try:
+            response = requests.post(self.webhook_url, json=formatted_message)
+            response.raise_for_status()
+            logger.info("Daily cost report sent to Slack")
+            return {"success": True, "status_code": response.status_code}
+        except Exception as e:
+            logger.error(f"Failed to send cost report to Slack: {e}")
+            return {"error": str(e)}
+    
+    def send_cost_alert(self, report: CostReport):
+        """Legacy method - redirects to send_daily_report"""
+        return self.send_daily_report(report)
     
     def _save_usage_record(self, record: UsageRecord):
         """Save usage record to current day file"""
@@ -253,65 +501,40 @@ class FinOpsAgent:
         with open(report_file, 'w') as f:
             json.dump(asdict(report), f, indent=2)
     
-    def send_cost_alert(self, report: CostReport):
-        """Send cost report to Slack"""
-        webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-        if not webhook_url:
-            logger.warning("No Slack webhook configured for cost alerts")
-            return
+    def get_monthly_summary(self) -> Dict[str, Any]:
+        """Get monthly cost summary"""
+        current_date = datetime.now(timezone.utc)
+        month_start = current_date.replace(day=1)
         
-        # Format message
-        emoji = "💰" if report.total_cost <= self.daily_budget else "🚨"
+        total_cost = 0
+        openai_cost = 0
+        fly_cost = 0
         
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{emoji} Daily Cost Report - {report.date}"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*Total Cost:*\n${report.total_cost:.2f}"},
-                    {"type": "mrkdwn", "text": f"*Budget:*\n${self.daily_budget:.2f}/day"},
-                    {"type": "mrkdwn", "text": f"*OpenAI:*\n${report.openai_cost:.2f}"},
-                    {"type": "mrkdwn", "text": f"*Fly.io:*\n${report.fly_cost:.2f}"}
-                ]
-            }
-        ]
+        # Sum up costs for the month
+        for day in range(1, current_date.day + 1):
+            date_str = month_start.replace(day=day).strftime("%Y-%m-%d")
+            records = self._load_usage_records(date_str)
+            
+            for record in records:
+                total_cost += record.cost
+                if record.service == "openai":
+                    openai_cost += record.cost
+                else:
+                    fly_cost += record.cost
         
-        # Add alerts if any
-        if report.alerts:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*Alerts:*\n" + "\n".join(report.alerts)
-                }
-            })
-        
-        # Add recommendations
-        if report.recommendations:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*Recommendations:*\n• " + "\n• ".join(report.recommendations)
-                }
-            })
-        
-        # Send to Slack
-        try:
-            response = requests.post(webhook_url, json={"blocks": blocks})
-            response.raise_for_status()
-            logger.info("Cost report sent to Slack")
-        except Exception as e:
-            logger.error(f"Failed to send cost report to Slack: {e}")
+        return {
+            "month": current_date.strftime("%Y-%m"),
+            "total_cost": total_cost,
+            "openai_cost": openai_cost,
+            "fly_cost": fly_cost,
+            "daily_average": total_cost / current_date.day,
+            "projected_monthly": (total_cost / current_date.day) * 30,
+            "budget_remaining": self.monthly_budget - total_cost,
+            "days_in_month": current_date.day
+        }
 
 # Integration with existing agents
-def track_agent_costs(agent_name: str, model: str, estimated_tokens: int):
+def track_agent_costs(agent_name: str, model: str, estimated_tokens: int, job_id: str = None):
     """Helper function to track costs from other agents"""
     finops = FinOpsAgent()
     
@@ -319,11 +542,15 @@ def track_agent_costs(agent_name: str, model: str, estimated_tokens: int):
     input_tokens = int(estimated_tokens * 0.3)
     output_tokens = int(estimated_tokens * 0.7)
     
+    metadata = {"agent": agent_name}
+    if job_id:
+        metadata["job_id"] = job_id
+    
     return finops.track_openai_usage(
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        metadata={"agent": agent_name}
+        metadata=metadata
     )
 
 # Daily report generation (to be called by scheduler)
@@ -331,7 +558,7 @@ def generate_and_send_daily_report():
     """Generate and send daily cost report"""
     finops = FinOpsAgent()
     report = finops.generate_daily_report()
-    finops.send_cost_alert(report)
+    finops.send_daily_report(report)
     
     return report
 
@@ -340,7 +567,7 @@ if __name__ == "__main__":
     agent = FinOpsAgent()
     
     # Track some sample usage
-    agent.track_openai_usage("gpt-4o", 1000, 2000, {"task": "code_generation"})
+    agent.track_openai_usage("gpt-4o", 1000, 2000, {"task": "code_generation", "job_id": "test_123"})
     agent.track_fly_usage("shared-cpu-1x", 300, 0.512)  # 5 minutes
     
     # Generate report
@@ -348,4 +575,4 @@ if __name__ == "__main__":
     print(json.dumps(asdict(report), indent=2))
     
     # Send alert
-    agent.send_cost_alert(report)
+    agent.send_daily_report(report)

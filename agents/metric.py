@@ -2,7 +2,7 @@
 import time
 import os
 import logging
-from agents.finops import track_agent_costs, FinOpsAgent
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,9 @@ def metric_node(state: dict) -> dict:
     
     # FinOpsエージェントでコストを追跡
     try:
+        # FinOpsエージェントのインポートをtry内で行う（循環参照を避ける）
+        from agents.finops import FinOpsAgent, track_agent_costs
+        
         # OpenAIコストの追跡
         finops = FinOpsAgent()
         
@@ -74,7 +77,11 @@ def metric_node(state: dict) -> dict:
             model=model,
             input_tokens=parser_tokens,
             output_tokens=50,  # パース結果
-            metadata={"agent": "parser", "query": state.get("query", "")}
+            metadata={
+                "agent": "parser", 
+                "query": state.get("query", ""),
+                "job_id": state.get("job_id", "unknown")
+            }
         )
         
         # Coder
@@ -85,7 +92,8 @@ def metric_node(state: dict) -> dict:
             metadata={
                 "agent": "coder",
                 "retries": retries,
-                "test_passed": passed
+                "test_passed": passed,
+                "job_id": state.get("job_id", "unknown")
             }
         )
         
@@ -97,7 +105,8 @@ def metric_node(state: dict) -> dict:
                 output_tokens=100,
                 metadata={
                     "agent": "reviewer",
-                    "review_reason": "retry" if retries > 0 else "failure"
+                    "review_reason": "retry" if retries > 0 else "failure",
+                    "job_id": state.get("job_id", "unknown")
                 }
             )
         
@@ -122,8 +131,12 @@ def metric_node(state: dict) -> dict:
             logger.warning(f"Daily budget warning: ${today_report.total_cost:.2f} of ${finops.daily_budget:.2f}")
             state["metrics"]["budget_alert"] = True
         
+    except ImportError as e:
+        # FinOpsモジュールが見つからない場合
+        logger.error(f"FinOps module not available: {e}")
+        state["metrics"]["finops_error"] = "FinOps module not available"
     except Exception as e:
-        # FinOpsエラーがあってもメトリクス処理は継続
+        # その他のFinOpsエラーがあってもメトリクス処理は継続
         logger.error(f"FinOps tracking error: {e}")
         state["metrics"]["finops_error"] = str(e)
     
@@ -132,11 +145,13 @@ def metric_node(state: dict) -> dict:
     
     return state
 
-def get_cost_summary() -> dict:
+def get_cost_summary() -> Dict[str, Any]:
     """
     現在のコストサマリーを取得する（APIエンドポイント用）
     """
     try:
+        from agents.finops import FinOpsAgent
+        
         finops = FinOpsAgent()
         report = finops.generate_daily_report()
         
@@ -150,6 +165,9 @@ def get_cost_summary() -> dict:
             "alerts": report.alerts,
             "recommendations": report.recommendations
         }
+    except ImportError:
+        logger.error("FinOps module not available")
+        return {"error": "FinOps module not available"}
     except Exception as e:
         logger.error(f"Failed to get cost summary: {e}")
         return {"error": str(e)}
